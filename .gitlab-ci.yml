@@ -1,0 +1,119 @@
+#STAGES
+stages:
+  - build
+  - test
+  - code-quality
+  - security
+  - preparation
+  - post-triggers
+#INCLUDE
+include:
+  - template: Security/Secret-Detection.gitlab-ci.yml
+  - template: Security/SAST.gitlab-ci.yml
+#VARIABLES
+variables: 
+  GITLAB_ADVANCED_SAST_ENABLED: "true"
+#BUILD_JOB
+build:
+  stage: build
+  tags:
+    - shell-executor
+  script:
+    - cd "$(pwd)/source"
+    - npm install --legacy-peer-deps
+    - npm run build 
+  allow_failure: true 
+  only:
+    - /^pys.*$/
+    - /^PYS.*$/
+#TEST_JOB
+test:
+  stage: test
+  tags:
+    - shell-executor
+  script:
+    - echo "Test aşamaları aktif edildiğinde bu kısımda yer alacaktır. Şablon olarak oluşturulmuştur."
+  allow_failure: true 
+  only:
+    - merge_requests
+#CQ_WITH_SONARQUBE_JOB
+cq_with_sonarqube:
+  stage: code-quality
+  image: sonarsource/sonar-scanner-cli:latest
+  tags:
+    - shell-executor
+  script: 
+    - sonar-scanner -Dsonar.projectKey="$CI_PROJECT_TITLE" -Dsonar.sources=. -Dsonar.host.url="$SONAR_URL" -Dsonar.token="$SONAR_LOGIN"
+  allow_failure: true
+  only:
+    - /^pys.*$/
+    - /^PYS.*$/
+#SECRET_DETECTION_JOB
+secret_detection:
+  stage: security
+  tags:
+    - docker-executor
+  allow_failure: true 
+  rules:
+    - if: "$CI_MERGE_REQUEST_ID"
+#SAST_JOB
+gitlab-advanced-sast:
+  stage: security
+  tags:
+    - docker-executor
+  allow_failure: true 
+  rules:
+    - if: "$CI_MERGE_REQUEST_ID"
+#MR_INFO_JOB
+mr_info:
+  stage: preparation
+  tags:
+    - shell-executor
+  script:
+    - MERGE_REQUEST_INFO_FOLDER_NAME="devinfops/$CI_PROJECT_ID-${CI_PROJECT_NAME//./-}/mr"
+    - MERGE_REQUEST_INFO_FILE_PATH="devinfops/$CI_PROJECT_ID-${CI_PROJECT_NAME//./-}/mr/merge_request_info"
+    - git config --global user.email "$GIT_USER_MAIL"
+    - git config --global user.name "$GIT_USER_NAME"
+    - git remote set-url origin https://$GIT_USER_NAME:$GITLAB_PRIVATE_TOKEN@$DEVINFOPS_SETTINGS_PROJECT_GIT
+    - git clone https://$GIT_USER_NAME:$GITLAB_PRIVATE_TOKEN@$DEVINFOPS_SETTINGS_PROJECT_GIT --branch $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+    - cd $DEVINFOPS_SETTINGS_PROJECT_PATH
+    - mkdir -p $MERGE_REQUEST_INFO_FOLDER_NAME
+    - echo "${CI_MERGE_REQUEST_IID}" > "merge_request_info" 
+    - mv merge_request_info $MERGE_REQUEST_INFO_FOLDER_NAME/
+    - git add $MERGE_REQUEST_INFO_FILE_PATH
+    - |
+      if ! git diff-index --quiet HEAD --; then
+        git commit -m "upsert to $MERGE_REQUEST_INFO_FILE_PATH file."
+        git push origin $CI_MERGE_REQUEST_TARGET_BRANCH_NAME
+      else
+        echo "No changes to commit"
+      fi 
+  allow_failure: true
+  only:
+    - merge_requests
+#POST_MERGE_JOB
+post_merge:
+  stage: post-triggers
+  tags:
+    - shell-executor
+  script:
+    - TRIGGER_JENKINS_JOB_URL="$JENKINS_URL$JENKINS_TRIGGER_JOB_PATH"
+    - MERGE_REQUEST_INFO_FILE_PATH="devinfops/$CI_PROJECT_ID-${CI_PROJECT_NAME//./-}/mr/merge_request_info"
+    - git clone https://$GIT_USER_NAME:$GITLAB_PRIVATE_TOKEN@$DEVINFOPS_SETTINGS_PROJECT_GIT --branch $CI_COMMIT_REF_NAME
+    - cd $DEVINFOPS_SETTINGS_PROJECT_PATH
+    - MERGE_REQUEST_ID=$(cat $MERGE_REQUEST_INFO_FILE_PATH)
+    - |
+      if [ -n "$MERGE_REQUEST_ID" ]; then
+        JENKINS_AUTH_HEADER=$(echo -n "$JENKINS_USER:$JENKINS_USER_API_TOKEN" | base64)
+        curl -X POST $TRIGGER_JENKINS_JOB_URL \
+             -H "Authorization:Basic $JENKINS_AUTH_HEADER" \
+             -d "PROJECT_ID=$CI_PROJECT_ID&MERGE_REQUEST_ID=${MERGE_REQUEST_ID}"
+      else
+        echo "MERGE_REQUEST_ID bilgisi alınamadığı için jenkins trigger çalıştırılmadı. Manuel talep oluşturarak süreçlerinize devam edebilirsiniz."
+      fi
+  allow_failure: true
+  only:
+    - master
+    - Development
+    - Test
+#X_JOB
